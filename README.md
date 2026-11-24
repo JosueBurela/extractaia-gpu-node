@@ -4,23 +4,49 @@ Repositorio dedicado para convertir una PC Windows 11 con **NVIDIA GeForce RTX 5
 
 ---
 
+## Instalación Automática con Antigravity (Recomendado — 1 Solo Prompt)
+
+Si vas a habilitar la PC con **Antigravity**, no necesitas ejecutar comandos a mano: Antigravity lee automáticamente [`AGENTS.md`](./AGENTS.md) y [`ANTIGRAVITY_SETUP.md`](./ANTIGRAVITY_SETUP.md), instala **Ollama** y **cloudflared**, aplica los parámetros VRAM de la **RTX 5060**, verifica inferencia visual real en **GPU** y levanta el túnel HTTPS listo para usar.
+
+### Pasos para el dueño de la PC
+1. Abre **Antigravity** en Windows 11.
+2. Copia y pega este **prompt exacto** (cambiando `<URL_DEL_REPO_GITHUB>` por el enlace real de este repositorio en GitHub):
+
+```text
+Clona (o abre si ya está clonado) el repositorio <URL_DEL_REPO_GITHUB> y configúrame esta PC Windows con RTX 5060 como nodo de IA local para ExtractaIA.
+Lee obligatoriamente AGENTS.md y ANTIGRAVITY_SETUP.md dentro del repositorio y ejecuta en orden estricto las Fases 0, 1, 2, 3 y 4 sin omitir ninguna verificación:
+1) Verifica disco libre, driver NVIDIA y soporte GPU (nada de correr en 100% CPU).
+2) Instala Ollama + cloudflared, configura las variables VRAM RTX 5060 y descarga qwen2.5vl:3b.
+3) Ejecuta .\scripts\03_probar_extraccion_local.ps1 y confirma extracción JSON válida con imagen PNG y carga en GPU.
+4) Inicia el túnel desacoplado con .\scripts\02_iniciar_servidor_ia.ps1 -Detached, comprueba HTTP 200 desde el túnel y entrégame la URL exacta para pegar en https://extractaia.dburela.com junto con el comando para apagarlo al terminar.
+```
+
+3. Cuando Antigravity termine, abre **[https://extractaia.dburela.com](https://extractaia.dburela.com)** → selecciona **IA Local** → **LLM Local (Ollama)** → pega la URL `https://*.trycloudflare.com` que te entregó y deja el modelo en **`qwen2.5vl:3b`**.
+
+> Documentación de ingeniería incluida en el repo:
+> - [`AGENTS.md`](./AGENTS.md) — Reglas automáticas y guardrails de seguridad para Antigravity.
+> - [`ANTIGRAVITY_SETUP.md`](./ANTIGRAVITY_SETUP.md) — Runbook técnico completo con Fases 0–4, matriz de troubleshooting y limpieza.
+
+---
+
 ## 1. Arquitectura de Conexión Segura
 
-```
+```text
 Navegador / Usuario
         │
         ▼  HTTPS (TLS 1.3)
 https://extractaia.dburela.com  (Oracle Cloud · Portal + Backend + Validación JSON)
         │
-        ▼  Túnel Inverso Cifrado (Cloudflare Quick Tunnel, solo saliente)
-127.0.0.1:11434  (PC Windows con Ollama)
+        ▼  Túnel Inverso Cifrado (Cloudflare Quick Tunnel, HTTP/2 saliente)
+127.0.0.1:11434                 (PC Windows con Ollama)
         │
-        ▼  CUDA / Flash Attention
+        ▼  CUDA / Flash Attention / KV Cache q8_0
 NVIDIA GeForce RTX 5060 (8 GB VRAM) · Modelo qwen2.5vl:3b
 ```
 
 - **Aislamiento de red:** Ollama escucha únicamente en `127.0.0.1:11434`. Ningún puerto del módem/router queda expuesto a Internet.
-- **Ciclo efímero del túnel:** Al cerrar la consola o presionar `Ctrl+C`, la URL temporal `https://*.trycloudflare.com` deja de existir al instante.
+- **Compatible con Wi-Fi universitario:** El túnel utiliza `--protocol http2` (TCP 443) por defecto para evitar bloqueos de UDP/QUIC en redes escolares.
+- **Ciclo efímero del túnel:** Al detener el proceso (con `.\scripts\04_detener_servidor_ia.ps1` o `Ctrl+C`), la URL temporal `https://*.trycloudflare.com` deja de existir al instante.
 - **Validación centralizada:** ExtractaIA API sanea y valida el JSON Schema fiscal, el cuadre aritmético y la estructura RFC/CURP antes de entregar la respuesta al cliente.
 
 ---
@@ -34,9 +60,9 @@ NVIDIA GeForce RTX 5060 (8 GB VRAM) · Modelo qwen2.5vl:3b
 
 ---
 
-## 3. Arranque Rápido (3 Comandos en PowerShell)
+## 3. Arranque Manual (PowerShell)
 
-Abre PowerShell dentro de la carpeta del repositorio:
+Si prefieres ejecutarlo manualmente en PowerShell desde la raíz del repositorio:
 
 ### Paso 1 — Instalar Ollama, Cloudflared, variables RTX 5060 y descargar `qwen2.5vl:3b`
 ```powershell
@@ -44,21 +70,25 @@ powershell -ExecutionPolicy Bypass -File .\scripts\01_instalar_nodo_gpu.ps1
 ```
 *(Opcional: agrega `-Include7B` si deseas descargar también `qwen2.5vl:7b` como alternativa de mayor tamaño).*
 
-### Paso 2 — Verificar inferencia local en GPU antes de exponer el túnel
+### Paso 2 — Validar texto + imagen PNG real en GPU antes de exponer el túnel
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\03_probar_extraccion_local.ps1
 ```
 
-### Paso 3 — Precargar VRAM e iniciar el túnel HTTPS para ExtractaIA
+### Paso 3 — Precargar VRAM e iniciar el túnel HTTPS (`-Detached` o en primer plano)
 ```powershell
+# Modo desacoplado (guarda PID/URL en .runtime/ y valida HTTP 200 remoto):
+powershell -ExecutionPolicy Bypass -File .\scripts\02_iniciar_servidor_ia.ps1 -Detached
+
+# O en primer plano para ver la salida en vivo (cerrar con Ctrl+C):
 powershell -ExecutionPolicy Bypass -File .\scripts\02_iniciar_servidor_ia.ps1
 ```
 
-1. Copia la URL temporal `https://xxxx-xxxx.trycloudflare.com` que imprime `cloudflared`.
-2. Entra a **[https://extractaia.dburela.com](https://extractaia.dburela.com)**.
-3. Selecciona la tarjeta **IA Local** → **LLM Local (Ollama)**.
-4. Pega la URL del túnel y confirma el modelo **`qwen2.5vl:3b`**.
-5. Sube una imagen (`JPG`, `PNG` o `WebP`) de factura, ticket o receta y extrae en vivo usando tu RTX 5060.
+### Paso 4 — Apagar el túnel al terminar la demostración
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\04_detener_servidor_ia.ps1
+# Agrega -StopOllama si deseas cerrar también el servicio Ollama
+```
 
 ---
 
@@ -67,4 +97,5 @@ powershell -ExecutionPolicy Bypass -File .\scripts\02_iniciar_servidor_ia.ps1
 - `OLLAMA_HOST=127.0.0.1:11434`: evita exposición en interfaz pública `0.0.0.0`.
 - `OLLAMA_KEEP_ALIVE=15m`: mantiene el modelo caliente en VRAM entre peticiones.
 - `OLLAMA_MAX_LOADED_MODELS=1`: impide cargar múltiples modelos simultáneos que saturen los 8 GB de VRAM.
-- `OLLAMA_FLASH_ATTENTION=1` y `OLLAMA_KV_CACHE_TYPE=q8_0`: reducen consumo de memoria en contexto de imágenes de alta resolución.
+- `OLLAMA_NUM_PARALLEL=2`: permite hasta 2 inferencias concurrentes sin desbordar los 8 GB.
+- `OLLAMA_FLASH_ATTENTION=1` y `OLLAMA_KV_CACHE_TYPE=q8_0`: reducen el consumo de memoria en contexto de imágenes de alta resolución.
