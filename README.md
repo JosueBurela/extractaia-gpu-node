@@ -10,10 +10,10 @@ Si vas a habilitar la PC con **Antigravity**, no necesitas ejecutar comandos a m
 
 ### Pasos para el dueño de la PC
 1. Abre **Antigravity** en Windows 11.
-2. Copia y pega este **prompt exacto** (cambiando `<URL_DEL_REPO_GITHUB>` por el enlace real de este repositorio en GitHub):
+2. Copia y pega este **prompt exacto** (ya incluye el enlace real de este repositorio):
 
 ```text
-Clona (o abre si ya está clonado) el repositorio <URL_DEL_REPO_GITHUB> y configúrame esta PC Windows con RTX 5060 como nodo de IA local para ExtractaIA.
+Clona (o abre si ya está clonado) el repositorio https://github.com/JosueBurela/extractaia-gpu-node y configúrame esta PC Windows con RTX 5060 como nodo de IA local para ExtractaIA.
 Lee obligatoriamente AGENTS.md y ANTIGRAVITY_SETUP.md dentro del repositorio y ejecuta en orden estricto las Fases 0, 1, 2, 3 y 4 sin omitir ninguna verificación:
 1) Verifica disco libre, driver NVIDIA y soporte GPU (nada de correr en 100% CPU).
 2) Instala Ollama + cloudflared, configura las variables VRAM RTX 5060 y descarga qwen2.5vl:3b.
