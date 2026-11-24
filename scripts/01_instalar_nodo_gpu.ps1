@@ -1,11 +1,14 @@
 ﻿[CmdletBinding()]
 param(
+    [ValidateSet("rtx5060_8gb", "rtx2050_4gb")]
+    [string]$Profile = "rtx5060_8gb",
     [switch]$Include7B
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== ExtractaIA GPU Node - Instalador RTX 5060 (8 GB VRAM) ===" -ForegroundColor Cyan
+$profileTitle = if ($Profile -eq "rtx2050_4gb") { "Laptop RTX 2050 (4 GB VRAM)" } else { "RTX 5060 (8 GB VRAM)" }
+Write-Host ("=== ExtractaIA GPU Node - Instalador {0} ===" -f $profileTitle) -ForegroundColor Cyan
 
 function Refresh-SessionPath {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -64,7 +67,7 @@ if ($nvidiaSmi) {
             $driverRaw = $parts[1].Trim()
             if ($driverRaw -match "^(\d+)") {
                 $driverMajor = [int]$Matches[1]
-                if ($driverMajor -lt 572) {
+                if ($Profile -eq "rtx5060_8gb" -and $driverMajor -lt 572) {
                     Write-Host ("[WARN] Driver NVIDIA detectado ({0}) < 572. Se recomienda actualizar a >= 572 para soporte completo de RTX 5060 Blackwell (sm_120)." -f $driverRaw) -ForegroundColor Yellow
                 }
             }
@@ -120,17 +123,28 @@ function Ensure-WingetPackage {
 $ollamaExe = Ensure-WingetPackage -CommandName "ollama" -WingetId "Ollama.Ollama" -DisplayName "Ollama" -CandidatePaths $ollamaCandidates
 $cloudflaredExe = Ensure-WingetPackage -CommandName "cloudflared" -WingetId "Cloudflare.cloudflared" -DisplayName "Cloudflare Tunnel (cloudflared)" -CandidatePaths $cloudflaredCandidates
 
-# 3. Configurar variables de entorno optimizadas para RTX 5060 (8 GB VRAM)
-$envSettings = [ordered]@{
-    "OLLAMA_HOST"              = "127.0.0.1:11434"
-    "OLLAMA_KEEP_ALIVE"        = "15m"
-    "OLLAMA_MAX_LOADED_MODELS" = "1"
-    "OLLAMA_NUM_PARALLEL"      = "2"
-    "OLLAMA_FLASH_ATTENTION"   = "1"
-    "OLLAMA_KV_CACHE_TYPE"     = "q8_0"
+# 3. Configurar variables de entorno optimizadas segun perfil de VRAM
+if ($Profile -eq "rtx2050_4gb") {
+    $envSettings = [ordered]@{
+        "OLLAMA_HOST"              = "127.0.0.1:11434"
+        "OLLAMA_KEEP_ALIVE"        = "10m"
+        "OLLAMA_MAX_LOADED_MODELS" = "1"
+        "OLLAMA_NUM_PARALLEL"      = "1"
+        "OLLAMA_FLASH_ATTENTION"   = "1"
+        "OLLAMA_KV_CACHE_TYPE"     = "q4_0"
+    }
+} else {
+    $envSettings = [ordered]@{
+        "OLLAMA_HOST"              = "127.0.0.1:11434"
+        "OLLAMA_KEEP_ALIVE"        = "15m"
+        "OLLAMA_MAX_LOADED_MODELS" = "1"
+        "OLLAMA_NUM_PARALLEL"      = "2"
+        "OLLAMA_FLASH_ATTENTION"   = "1"
+        "OLLAMA_KV_CACHE_TYPE"     = "q8_0"
+    }
 }
 
-Write-Host "`n=== Configurando variables de entorno VRAM RTX 5060 (8 GB) ===" -ForegroundColor Cyan
+Write-Host ("`n=== Configurando variables de entorno VRAM ({0}) ===" -f $profileTitle) -ForegroundColor Cyan
 foreach ($entry in $envSettings.GetEnumerator()) {
     [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "User")
     Set-Item -Path ("Env:{0}" -f $entry.Key) -Value $entry.Value

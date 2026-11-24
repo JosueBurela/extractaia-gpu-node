@@ -1,14 +1,49 @@
 ﻿[CmdletBinding()]
 param(
+    [ValidateSet("rtx5060_8gb", "rtx2050_4gb")]
+    [string]$Profile = "rtx5060_8gb",
     [string]$Model = "qwen2.5vl:3b",
     [switch]$Detached,
     [ValidateSet("http2", "auto", "quic")]
-    [string]$Protocol = "http2"
+    [string]$Protocol = "http2",
+    [string]$RegisterUrl = "",
+    [string]$NodeToken = "",
+    [string]$NodeId = "",
+    [string]$NodeLabel = "",
+    [int]$Priority = 0
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== ExtractaIA GPU Node - Arranque de Servidor + Tunel HTTPS ===" -ForegroundColor Cyan
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$dotenvPath = Join-Path $repoRoot ".env"
+$dotenvMap = @{}
+if (Test-Path $dotenvPath) {
+    foreach ($rawLine in (Get-Content -Path $dotenvPath -ErrorAction SilentlyContinue)) {
+        $line = $rawLine.Trim()
+        if (-not $line -or $line.StartsWith("#")) { continue }
+        $eqIdx = $line.IndexOf("=")
+        if ($eqIdx -gt 0) {
+            $k = $line.Substring(0, $eqIdx).Trim()
+            $v = $line.Substring($eqIdx + 1).Trim().Trim('"').Trim("'")
+            $dotenvMap[$k] = $v
+        }
+    }
+}
+
+if (-not $RegisterUrl -and $dotenvMap.ContainsKey("EXTRACTAIA_REGISTER_URL")) { $RegisterUrl = $dotenvMap["EXTRACTAIA_REGISTER_URL"] }
+if (-not $NodeToken -and $dotenvMap.ContainsKey("GPU_NODE_TOKEN")) { $NodeToken = $dotenvMap["GPU_NODE_TOKEN"] }
+if (-not $NodeId -and $dotenvMap.ContainsKey("GPU_NODE_ID")) { $NodeId = $dotenvMap["GPU_NODE_ID"] }
+if (-not $NodeLabel -and $dotenvMap.ContainsKey("GPU_NODE_LABEL")) { $NodeLabel = $dotenvMap["GPU_NODE_LABEL"] }
+if ($Priority -le 0 -and $dotenvMap.ContainsKey("GPU_NODE_PRIORITY")) {
+    $parsedPrio = 0
+    if ([int]::TryParse($dotenvMap["GPU_NODE_PRIORITY"], [ref]$parsedPrio)) { $Priority = $parsedPrio }
+}
+if (-not $NodeId) { $NodeId = if ($Profile -eq "rtx2050_4gb") { "laptop-rtx2050" } else { "pc-rtx5060" } }
+if (-not $NodeLabel) { $NodeLabel = if ($Profile -eq "rtx2050_4gb") { "Laptop RTX 2050 (4 GB)" } else { "Desktop RTX 5060 (8 GB)" } }
+if ($Priority -le 0) { $Priority = if ($Profile -eq "rtx2050_4gb") { 20 } else { 10 } }
+
+Write-Host ("=== ExtractaIA GPU Node - Arranque ({0}) + Tunel HTTPS ===" -f $Profile) -ForegroundColor Cyan
 
 function Refresh-SessionPath {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -41,13 +76,19 @@ function Resolve-ToolExecutable {
     return $null
 }
 
-# Aplicar las 6 variables de optimizacion VRAM RTX 5060 (8 GB) en la sesion actual
+# Aplicar variables de optimizacion VRAM segun perfil
 $env:OLLAMA_HOST = "127.0.0.1:11434"
-$env:OLLAMA_KEEP_ALIVE = "15m"
 $env:OLLAMA_MAX_LOADED_MODELS = "1"
-$env:OLLAMA_NUM_PARALLEL = "2"
 $env:OLLAMA_FLASH_ATTENTION = "1"
-$env:OLLAMA_KV_CACHE_TYPE = "q8_0"
+if ($Profile -eq "rtx2050_4gb") {
+    $env:OLLAMA_KEEP_ALIVE = "10m"
+    $env:OLLAMA_NUM_PARALLEL = "1"
+    $env:OLLAMA_KV_CACHE_TYPE = "q4_0"
+} else {
+    $env:OLLAMA_KEEP_ALIVE = "15m"
+    $env:OLLAMA_NUM_PARALLEL = "2"
+    $env:OLLAMA_KV_CACHE_TYPE = "q8_0"
+}
 
 $ollamaExe = Resolve-ToolExecutable -CommandName "ollama" -CandidatePaths @(
     (Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"),
@@ -217,12 +258,33 @@ if ($Detached) {
         throw ("El tunel {0} no respondio HTTP 200 en /api/tags y /v1/models tras 8 reintentos. Ultimo error: {1}`n{2}" -f $tunnelUrl, $lastRemoteError, $errTail)
     }
 
+    $poolRegistered = $false
+    if ($RegisterUrl -and $NodeToken -and ($NodeToken -ne "REEMPLAZAR_POR_TOKEN_OPERADOR")) {
+        $regEndpoint = ("{0}/api/v1/internal/gpu-nodes/register" -f $RegisterUrl.TrimEnd("/"))
+        $regBody = @{
+            id       = $NodeId
+            label    = $NodeLabel
+            base_url = $tunnelUrl
+            model    = $Model
+            priority = $Priority
+        } | ConvertTo-Json -Depth 4
+        Write-Host ("Registrando nodo '{0}' en pool ExtractaIA ({1})..." -f $NodeId, $regEndpoint) -ForegroundColor Cyan
+        $regResp = Invoke-RestMethod -Uri $regEndpoint -Method Post -Headers @{ "X-Node-Token" = $NodeToken } -ContentType "application/json" -Body $regBody -TimeoutSec 12
+        if ($null -ne $regResp.node) {
+            $poolRegistered = $true
+            Write-Host ("[OK] Nodo '{0}' registrado en el pool productivo (prioridad {1})." -f $NodeId, $Priority) -ForegroundColor Green
+        }
+    }
+
     Write-Host "`n=====================================================================" -ForegroundColor Green
     Write-Host "STATUS=READY" -ForegroundColor Green
     Write-Host ("TUNNEL_URL={0}" -f $tunnelUrl) -ForegroundColor White
     Write-Host ("TUNNEL_PID={0}" -f $proc.Id) -ForegroundColor White
+    Write-Host ("PROFILE={0}" -f $Profile) -ForegroundColor White
     Write-Host ("MODEL={0}" -f $Model) -ForegroundColor White
     Write-Host ("PROTOCOL={0}" -f $Protocol) -ForegroundColor White
+    Write-Host ("NODE_ID={0}" -f $NodeId) -ForegroundColor White
+    Write-Host ("POOL_REGISTERED={0}" -f $poolRegistered) -ForegroundColor White
     Write-Host "PORTAL_URL=https://extractaia.dburela.com" -ForegroundColor White
     Write-Host "=====================================================================" -ForegroundColor Green
     exit 0

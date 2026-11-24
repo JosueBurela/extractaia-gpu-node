@@ -64,27 +64,34 @@ NVIDIA GeForce RTX 5060 (8 GB VRAM) · Modelo qwen2.5vl:3b
 
 Si prefieres ejecutarlo manualmente en PowerShell desde la raíz del repositorio:
 
-### Paso 1 — Instalar Ollama, Cloudflared, variables RTX 5060 y descargar `qwen2.5vl:3b`
+### Paso 1 — Instalar Ollama, Cloudflared, variables VRAM y descargar `qwen2.5vl:3b`
 ```powershell
+# Desktop RTX 5060 (8 GB VRAM, perfil por defecto):
 powershell -ExecutionPolicy Bypass -File .\scripts\01_instalar_nodo_gpu.ps1
+
+# Laptop RTX 2050 (4 GB VRAM, KV Cache q4_0 + paralelismo 1):
+powershell -ExecutionPolicy Bypass -File .\scripts\01_instalar_nodo_gpu.ps1 -Profile rtx2050_4gb
 ```
-*(Opcional: agrega `-Include7B` si deseas descargar también `qwen2.5vl:7b` como alternativa de mayor tamaño).*
+*(Opcional: agrega `-Include7B` en RTX 5060 si deseas descargar también `qwen2.5vl:7b`).*
 
 ### Paso 2 — Validar texto + imagen PNG real en GPU antes de exponer el túnel
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\03_probar_extraccion_local.ps1
 ```
 
-### Paso 3 — Precargar VRAM e iniciar el túnel HTTPS (`-Detached` o en primer plano)
+### Paso 3 — Precargar VRAM, iniciar el túnel HTTPS y registrarse al pool interno
 ```powershell
-# Modo desacoplado (guarda PID/URL en .runtime/ y valida HTTP 200 remoto):
+# Desktop RTX 5060 (lee .env local si está configurado para auto-registro):
 powershell -ExecutionPolicy Bypass -File .\scripts\02_iniciar_servidor_ia.ps1 -Detached
+
+# Arranque directo en 1 clic para laptop RTX 2050 (4 GB VRAM):
+powershell -ExecutionPolicy Bypass -File .\scripts\iniciar_laptop_rtx2050.ps1
 
 # O en primer plano para ver la salida en vivo (cerrar con Ctrl+C):
 powershell -ExecutionPolicy Bypass -File .\scripts\02_iniciar_servidor_ia.ps1
 ```
 
-### Paso 4 — Apagar el túnel al terminar la demostración
+### Paso 4 — Apagar el túnel y dar de baja el nodo al terminar la demostración
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\04_detener_servidor_ia.ps1
 # Agrega -StopOllama si deseas cerrar también el servicio Ollama
@@ -92,10 +99,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\04_detener_servidor_ia.ps1
 
 ---
 
-## 4. Variables de Optimización (`config/rtx5060_8gb.env.example`)
+## 4. Perfiles de Hardware y Registro al Pool (`config/`)
 
-- `OLLAMA_HOST=127.0.0.1:11434`: evita exposición en interfaz pública `0.0.0.0`.
-- `OLLAMA_KEEP_ALIVE=15m`: mantiene el modelo caliente en VRAM entre peticiones.
-- `OLLAMA_MAX_LOADED_MODELS=1`: impide cargar múltiples modelos simultáneos que saturen los 8 GB de VRAM.
-- `OLLAMA_NUM_PARALLEL=2`: permite hasta 2 inferencias concurrentes sin desbordar los 8 GB.
-- `OLLAMA_FLASH_ATTENTION=1` y `OLLAMA_KV_CACHE_TYPE=q8_0`: reducen el consumo de memoria en contexto de imágenes de alta resolución.
+- **RTX 5060 (8 GB VRAM)** — [`config/rtx5060_8gb.env.example`](./config/rtx5060_8gb.env.example): `OLLAMA_KEEP_ALIVE=15m`, `OLLAMA_NUM_PARALLEL=2`, `OLLAMA_KV_CACHE_TYPE=q8_0`.
+- **Laptop RTX 2050 (4 GB VRAM)** — [`config/rtx2050_4gb_laptop.env.example`](./config/rtx2050_4gb_laptop.env.example): `OLLAMA_KEEP_ALIVE=10m`, `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_KV_CACHE_TYPE=q4_0`.
+- **Auto-registro transparente**: Si existe un archivo `.env` local (ignorado por Git) con `EXTRACTAIA_REGISTER_URL` y `GPU_NODE_TOKEN`, el nodo se da de alta automáticamente en `https://extractaia.dburela.com` para atender peticiones **Doc-to-SQL** de imágenes/notas sin exponer URLs ni claves en el portal web.
