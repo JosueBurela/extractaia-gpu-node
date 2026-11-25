@@ -47,6 +47,7 @@ $ollamaCandidates = @(
 )
 
 $cloudflaredCandidates = @(
+    (Join-Path $env:LOCALAPPDATA "Programs\cloudflared\cloudflared.exe"),
     (Join-Path ${env:ProgramFiles(x86)} "cloudflared\cloudflared.exe"),
     (Join-Path $env:ProgramFiles "cloudflared\cloudflared.exe")
 )
@@ -120,8 +121,58 @@ function Ensure-WingetPackage {
     return $installed
 }
 
+function Ensure-CloudflaredBinary {
+    param(
+        [string[]]$CandidatePaths = @()
+    )
+
+    $existing = Resolve-ToolExecutable -CommandName "cloudflared" -CandidatePaths $CandidatePaths
+    if ($existing) {
+        Write-Host ("[OK] Cloudflare Tunnel (cloudflared) ya esta instalado en: {0}" -f $existing) -ForegroundColor Green
+        return $existing
+    }
+
+    $installDir = Join-Path $env:LOCALAPPDATA "Programs\cloudflared"
+    $dest = Join-Path $installDir "cloudflared.exe"
+    if (-not (Test-Path $installDir)) {
+        New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+    }
+
+    $downloadUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+    Write-Host "[Instalando] Descargando binario oficial user-space de Cloudflare Tunnel (sin bloqueo UAC)..." -ForegroundColor Yellow
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $dest -UseBasicParsing
+
+    $sig = Get-AuthenticodeSignature -FilePath $dest
+    if (-not $sig -or $sig.Status -ne "Valid") {
+        $sigStatus = if ($sig) { $sig.Status } else { "Unknown" }
+        Remove-Item -Path $dest -Force -ErrorAction SilentlyContinue
+        throw ("Firma digital Authenticode de cloudflared.exe invalida ({0}). Descarga abortada." -f $sigStatus)
+    }
+
+    $verOut = (& $dest --version 2>&1) -join " "
+    if ($LASTEXITCODE -ne 0) {
+        Remove-Item -Path $dest -Force -ErrorAction SilentlyContinue
+        throw ("El binario descargado de cloudflared fallo --version (codigo {0})." -f $LASTEXITCODE)
+    }
+
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not $userPath) { $userPath = "" }
+    $entries = @($userPath -split ";" | Where-Object { $_.Trim() -ne "" })
+    if (-not ($entries -contains $installDir)) {
+        $newUserPath = (@($installDir) + $entries) -join ";"
+        [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+    }
+    if ($env:Path -notlike "*$installDir*") {
+        $env:Path = "$installDir;$env:Path"
+    }
+
+    Write-Host ("[OK] Cloudflare Tunnel instalado en {0} ({1})" -f $dest, $verOut) -ForegroundColor Green
+    return $dest
+}
+
 $ollamaExe = Ensure-WingetPackage -CommandName "ollama" -WingetId "Ollama.Ollama" -DisplayName "Ollama" -CandidatePaths $ollamaCandidates
-$cloudflaredExe = Ensure-WingetPackage -CommandName "cloudflared" -WingetId "Cloudflare.cloudflared" -DisplayName "Cloudflare Tunnel (cloudflared)" -CandidatePaths $cloudflaredCandidates
+$cloudflaredExe = Ensure-CloudflaredBinary -CandidatePaths $cloudflaredCandidates
 
 # 3. Configurar variables de entorno optimizadas segun perfil de VRAM
 if ($Profile -eq "rtx2050_4gb") {

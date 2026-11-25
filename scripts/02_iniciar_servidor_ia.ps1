@@ -99,6 +99,7 @@ if (-not $ollamaExe) {
 }
 
 $cloudflaredExe = Resolve-ToolExecutable -CommandName "cloudflared" -CandidatePaths @(
+    (Join-Path $env:LOCALAPPDATA "Programs\cloudflared\cloudflared.exe"),
     (Join-Path ${env:ProgramFiles(x86)} "cloudflared\cloudflared.exe"),
     (Join-Path $env:ProgramFiles "cloudflared\cloudflared.exe")
 )
