@@ -4,6 +4,7 @@ param(
     [string]$Profile = "rtx5060_8gb",
     [string]$Model = "qwen2.5vl:3b",
     [switch]$Detached,
+    [switch]$KeepAlive,
     [ValidateSet("http2", "auto", "quic")]
     [string]$Protocol = "http2",
     [string]$RegisterUrl = "",
@@ -83,7 +84,7 @@ $env:OLLAMA_FLASH_ATTENTION = "1"
 if ($Profile -eq "rtx2050_4gb") {
     $env:OLLAMA_KEEP_ALIVE = "10m"
     $env:OLLAMA_NUM_PARALLEL = "1"
-    $env:OLLAMA_KV_CACHE_TYPE = "q4_0"
+    $env:OLLAMA_KV_CACHE_TYPE = "q8_0"
 } else {
     $env:OLLAMA_KEEP_ALIVE = "15m"
     $env:OLLAMA_NUM_PARALLEL = "2"
@@ -129,8 +130,8 @@ if (-not $running) {
     throw "Ollama no respondio en http://127.0.0.1:11434."
 }
 
-# 2. Warm-up: precargar el modelo en la VRAM de la RTX 5060
-Write-Host ("Precargando modelo '{0}' en la VRAM de la RTX 5060..." -f $Model) -ForegroundColor Cyan
+# 2. Warm-up: precargar el modelo en la VRAM del nodo GPU
+Write-Host ("Precargando modelo '{0}' en la VRAM ({1})..." -f $Model, $Profile) -ForegroundColor Cyan
 $warmupBody = @{
     model = $Model
     messages = @(
@@ -141,7 +142,7 @@ $warmupBody = @{
 } | ConvertTo-Json -Depth 5
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-$warmupResp = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/chat" -Method Post -ContentType "application/json" -Body $warmupBody -TimeoutSec 60
+$warmupResp = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/chat" -Method Post -ContentType "application/json" -Body $warmupBody -TimeoutSec 180
 $sw.Stop()
 Write-Host ("[OK] Warm-up completado en {0} ms." -f $sw.ElapsedMilliseconds) -ForegroundColor Green
 
@@ -288,15 +289,35 @@ if ($Detached) {
     Write-Host ("POOL_REGISTERED={0}" -f $poolRegistered) -ForegroundColor White
     Write-Host "PORTAL_URL=https://extractaia.dburela.com" -ForegroundColor White
     Write-Host "=====================================================================" -ForegroundColor Green
+
+    if ($KeepAlive) {
+        Write-Host "Modo KeepAlive activo: manteniendo tunel HTTPS y nodo GPU en linea. Presiona Ctrl+C para detener." -ForegroundColor Yellow
+        try {
+            while (-not $proc.HasExited) {
+                Start-Sleep -Seconds 5
+            }
+            Write-Host ("[WARN] cloudflared finalizo inesperadamente (codigo {0})." -f $proc.ExitCode) -ForegroundColor Yellow
+        } finally {
+            if ($poolRegistered -and $RegisterUrl -and $NodeToken -and ($NodeToken -ne "REEMPLAZAR_POR_TOKEN_OPERADOR")) {
+                try {
+                    $delUrl = ("{0}/api/v1/internal/gpu-nodes/{1}" -f $RegisterUrl.TrimEnd("/"), $NodeId)
+                    Invoke-RestMethod -Uri $delUrl -Method Delete -Headers @{ "X-Node-Token" = $NodeToken } -TimeoutSec 8 | Out-Null
+                } catch { }
+            }
+            if (-not $proc.HasExited) {
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
     exit 0
 }
 
 Write-Host "`n=====================================================================" -ForegroundColor Yellow
-Write-Host " INSTRUCCIONES PARA EXTRACTAIA (https://extractaia.dburela.com):" -ForegroundColor Yellow
-Write-Host " 1) Copia la URL HTTPS 'https://xxxx.trycloudflare.com' que aparecera abajo." -ForegroundColor White
-Write-Host " 2) En el portal web selecciona: IA Local -> LLM Local (Ollama)." -ForegroundColor White
-Write-Host (" 3) Pega esa URL y deja el modelo en: {0}" -f $Model) -ForegroundColor White
-Write-Host " 4) Presiona Ctrl+C al finalizar la demo para cerrar el tunel al instante." -ForegroundColor White
+Write-Host " EXTRACTAIA GPU NODE ACTIVO (https://extractaia.dburela.com):" -ForegroundColor Yellow
+Write-Host (" 1) Perfil: {0} | Modelo: {1} | Nodo: {2}" -f $Profile, $Model, $NodeId) -ForegroundColor White
+Write-Host " 2) El tunel HTTPS atiende peticiones Doc-to-SQL de notas e imagenes." -ForegroundColor White
+Write-Host " 3) Si configuraste .env local, inicia con -Detached para auto-registro en el pool." -ForegroundColor White
+Write-Host " 4) Presiona Ctrl+C al finalizar para cerrar el tunel al instante." -ForegroundColor White
 Write-Host "=====================================================================`n" -ForegroundColor Yellow
 
 & $cloudflaredExe tunnel --url http://127.0.0.1:11434 --protocol $Protocol --no-autoupdate

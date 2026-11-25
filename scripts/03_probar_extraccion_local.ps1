@@ -89,6 +89,38 @@ function New-SyntheticInvoicePngBase64 {
     }
 }
 
+$ollamaExe = Resolve-ToolExecutable -CommandName "ollama" -CandidatePaths @(
+    (Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"),
+    (Join-Path $env:ProgramFiles "Ollama\ollama.exe")
+)
+
+if ($baseUrl -match "^https?://(127\.0\.0\.1|localhost)(:\d+)?$") {
+    $ollamaUp = $false
+    try {
+        Invoke-RestMethod -Uri ("{0}/api/tags" -f $baseUrl) -Method Get -TimeoutSec 2 | Out-Null
+        $ollamaUp = $true
+    } catch { }
+
+    if (-not $ollamaUp) {
+        if (-not $ollamaExe) {
+            throw "Ollama no esta activo en $baseUrl y no se encontro ollama.exe. Ejecuta primero .\scripts\01_instalar_nodo_gpu.ps1"
+        }
+        Write-Host ("Iniciando Ollama automaticamente en {0}..." -f $baseUrl) -ForegroundColor Yellow
+        Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden
+        for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Seconds 1
+            try {
+                Invoke-RestMethod -Uri ("{0}/api/tags" -f $baseUrl) -Method Get -TimeoutSec 2 | Out-Null
+                $ollamaUp = $true
+                break
+            } catch { }
+        }
+        if (-not $ollamaUp) {
+            throw ("Ollama no respondio en {0} tras 20 segundos." -f $baseUrl)
+        }
+    }
+}
+
 # 1. Verificar endpoints de catalogo (/api/tags y /v1/models)
 $tags = Invoke-RestMethod -Uri ("{0}/api/tags" -f $baseUrl) -Method Get -TimeoutSec 8
 $modelsList = Invoke-RestMethod -Uri ("{0}/v1/models" -f $baseUrl) -Method Get -TimeoutSec 8
@@ -119,7 +151,7 @@ $textPayload = @{
 } | ConvertTo-Json -Depth 8
 
 $sw1 = [System.Diagnostics.Stopwatch]::StartNew()
-$resp1 = Invoke-RestMethod -Uri $endpoint -Method Post -ContentType "application/json" -Body $textPayload -TimeoutSec 45
+$resp1 = Invoke-RestMethod -Uri $endpoint -Method Post -ContentType "application/json" -Body $textPayload -TimeoutSec 150
 $sw1.Stop()
 
 $parsed1 = ConvertFrom-LlmJson -RawText ([string]$resp1.choices[0].message.content)
@@ -155,7 +187,7 @@ if (-not $SkipVision) {
     } | ConvertTo-Json -Depth 8
 
     $sw2 = [System.Diagnostics.Stopwatch]::StartNew()
-    $resp2 = Invoke-RestMethod -Uri $endpoint -Method Post -ContentType "application/json" -Body $visionPayload -TimeoutSec 60
+    $resp2 = Invoke-RestMethod -Uri $endpoint -Method Post -ContentType "application/json" -Body $visionPayload -TimeoutSec 150
     $sw2.Stop()
 
     $parsed2 = ConvertFrom-LlmJson -RawText ([string]$resp2.choices[0].message.content)

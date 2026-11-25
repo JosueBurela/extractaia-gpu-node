@@ -182,7 +182,7 @@ if ($Profile -eq "rtx2050_4gb") {
         "OLLAMA_MAX_LOADED_MODELS" = "1"
         "OLLAMA_NUM_PARALLEL"      = "1"
         "OLLAMA_FLASH_ATTENTION"   = "1"
-        "OLLAMA_KV_CACHE_TYPE"     = "q4_0"
+        "OLLAMA_KV_CACHE_TYPE"     = "q8_0"
     }
 } else {
     $envSettings = [ordered]@{
@@ -227,7 +227,7 @@ $ollamaVersion = (& $ollamaExe --version 2>&1) -join " "
 Write-Host ("[OK] Ollama activo en http://127.0.0.1:11434 ({0})" -f $ollamaVersion) -ForegroundColor Green
 
 # 5. Descargar modelo multimodal recomendado
-Write-Host "`n=== Descargando modelo qwen2.5vl:3b (~3.2 GB, optimo para 8 GB VRAM) ===" -ForegroundColor Cyan
+Write-Host "`n=== Descargando modelo qwen2.5vl:3b (~3.2 GB, optimo para 4-8 GB VRAM) ===" -ForegroundColor Cyan
 & $ollamaExe pull qwen2.5vl:3b
 if ($LASTEXITCODE -ne 0) {
     throw ("Fallo la descarga del modelo qwen2.5vl:3b (codigo {0})." -f $LASTEXITCODE)

@@ -69,7 +69,7 @@ Si prefieres ejecutarlo manualmente en PowerShell desde la raíz del repositorio
 # Desktop RTX 5060 (8 GB VRAM, perfil por defecto):
 powershell -ExecutionPolicy Bypass -File .\scripts\01_instalar_nodo_gpu.ps1
 
-# Laptop RTX 2050 (4 GB VRAM, KV Cache q4_0 + paralelismo 1):
+# Laptop RTX 2050 (4 GB VRAM, KV Cache q8_0 + paralelismo 1):
 powershell -ExecutionPolicy Bypass -File .\scripts\01_instalar_nodo_gpu.ps1 -Profile rtx2050_4gb
 ```
 *(Opcional: agrega `-Include7B` en RTX 5060 si deseas descargar también `qwen2.5vl:7b`).*
@@ -102,5 +102,5 @@ powershell -ExecutionPolicy Bypass -File .\scripts\04_detener_servidor_ia.ps1
 ## 4. Perfiles de Hardware y Registro al Pool (`config/`)
 
 - **RTX 5060 (8 GB VRAM)** — [`config/rtx5060_8gb.env.example`](./config/rtx5060_8gb.env.example): `OLLAMA_KEEP_ALIVE=15m`, `OLLAMA_NUM_PARALLEL=2`, `OLLAMA_KV_CACHE_TYPE=q8_0`.
-- **Laptop RTX 2050 (4 GB VRAM)** — [`config/rtx2050_4gb_laptop.env.example`](./config/rtx2050_4gb_laptop.env.example): `OLLAMA_KEEP_ALIVE=10m`, `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_KV_CACHE_TYPE=q4_0`.
+- **Laptop RTX 2050 (4 GB VRAM)** — [`config/rtx2050_4gb_laptop.env.example`](./config/rtx2050_4gb_laptop.env.example): `OLLAMA_KEEP_ALIVE=10m`, `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_KV_CACHE_TYPE=q8_0`.
 - **Auto-registro transparente**: Si existe un archivo `.env` local (ignorado por Git) con `EXTRACTAIA_REGISTER_URL` y `GPU_NODE_TOKEN`, el nodo se da de alta automáticamente en `https://extractaia.dburela.com` para atender peticiones **Doc-to-SQL** de imágenes/notas sin exponer URLs ni claves en el portal web.
