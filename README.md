@@ -103,4 +103,5 @@ powershell -ExecutionPolicy Bypass -File .\scripts\04_detener_servidor_ia.ps1
 
 - **RTX 5060 (8 GB VRAM)** — [`config/rtx5060_8gb.env.example`](./config/rtx5060_8gb.env.example): `OLLAMA_KEEP_ALIVE=15m`, `OLLAMA_NUM_PARALLEL=2`, `OLLAMA_KV_CACHE_TYPE=q8_0`.
 - **Laptop RTX 2050 (4 GB VRAM)** — [`config/rtx2050_4gb_laptop.env.example`](./config/rtx2050_4gb_laptop.env.example): `OLLAMA_KEEP_ALIVE=10m`, `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_KV_CACHE_TYPE=q8_0`.
+- **Reescritura de Host y túnel SSH opcional**: Los túneles Cloudflare reescriben automáticamente `--http-host-header 127.0.0.1:11434` (requerido por Ollama `0.40+` para evitar rechazos HTTP `403`). Si tu laptop cuenta con acceso SSH directo al servidor Oracle, configura `GPU_TUNNEL_TRANSPORT=ssh` en `.env` para abrir un túnel inverso privado en loopback sin límites `429`.
 - **Auto-registro transparente**: Si existe un archivo `.env` local (ignorado por Git) con `EXTRACTAIA_REGISTER_URL` y `GPU_NODE_TOKEN`, el nodo se da de alta automáticamente en `https://extractaia.dburela.com` para atender peticiones **Doc-to-SQL** de imágenes/notas sin exponer URLs ni claves en el portal web.

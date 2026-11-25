@@ -11,7 +11,11 @@ param(
     [string]$NodeToken = "",
     [string]$NodeId = "",
     [string]$NodeLabel = "",
-    [int]$Priority = 0
+    [int]$Priority = 0,
+    [ValidateSet("auto", "cloudflare", "ssh")]
+    [string]$Transport = "auto",
+    [string]$SshHost = "",
+    [int]$SshRemotePort = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,11 +44,21 @@ if ($Priority -le 0 -and $dotenvMap.ContainsKey("GPU_NODE_PRIORITY")) {
     $parsedPrio = 0
     if ([int]::TryParse($dotenvMap["GPU_NODE_PRIORITY"], [ref]$parsedPrio)) { $Priority = $parsedPrio }
 }
+if ($Transport -eq "auto") {
+    $envTransport = if ($dotenvMap.ContainsKey("GPU_TUNNEL_TRANSPORT")) { $dotenvMap["GPU_TUNNEL_TRANSPORT"].ToLowerInvariant() } else { "cloudflare" }
+    $Transport = if ($envTransport -in @("ssh", "cloudflare")) { $envTransport } else { "cloudflare" }
+}
+if (-not $SshHost -and $dotenvMap.ContainsKey("GPU_SSH_HOST")) { $SshHost = $dotenvMap["GPU_SSH_HOST"] }
+if ($SshRemotePort -le 0 -and $dotenvMap.ContainsKey("GPU_SSH_REMOTE_PORT")) {
+    $parsedPort = 0
+    if ([int]::TryParse($dotenvMap["GPU_SSH_REMOTE_PORT"], [ref]$parsedPort)) { $SshRemotePort = $parsedPort }
+}
+if ($SshRemotePort -le 0) { $SshRemotePort = 11434 }
 if (-not $NodeId) { $NodeId = if ($Profile -eq "rtx2050_4gb") { "laptop-rtx2050" } else { "pc-rtx5060" } }
 if (-not $NodeLabel) { $NodeLabel = if ($Profile -eq "rtx2050_4gb") { "Laptop RTX 2050 (4 GB)" } else { "Desktop RTX 5060 (8 GB)" } }
 if ($Priority -le 0) { $Priority = if ($Profile -eq "rtx2050_4gb") { 20 } else { 10 } }
 
-Write-Host ("=== ExtractaIA GPU Node - Arranque ({0}) + Tunel HTTPS ===" -f $Profile) -ForegroundColor Cyan
+Write-Host ("=== ExtractaIA GPU Node - Arranque ({0} | transport={1}) ===" -f $Profile, $Transport) -ForegroundColor Cyan
 
 function Refresh-SessionPath {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -99,13 +113,27 @@ if (-not $ollamaExe) {
     throw "No se encontro 'ollama'. Ejecuta primero .\scripts\01_instalar_nodo_gpu.ps1"
 }
 
-$cloudflaredExe = Resolve-ToolExecutable -CommandName "cloudflared" -CandidatePaths @(
-    (Join-Path $env:LOCALAPPDATA "Programs\cloudflared\cloudflared.exe"),
-    (Join-Path ${env:ProgramFiles(x86)} "cloudflared\cloudflared.exe"),
-    (Join-Path $env:ProgramFiles "cloudflared\cloudflared.exe")
-)
-if (-not $cloudflaredExe) {
-    throw "No se encontro 'cloudflared'. Ejecuta primero .\scripts\01_instalar_nodo_gpu.ps1"
+$cloudflaredExe = $null
+$sshExe = $null
+if ($Transport -eq "cloudflare") {
+    $cloudflaredExe = Resolve-ToolExecutable -CommandName "cloudflared" -CandidatePaths @(
+        (Join-Path $env:LOCALAPPDATA "Programs\cloudflared\cloudflared.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "cloudflared\cloudflared.exe"),
+        (Join-Path $env:ProgramFiles "cloudflared\cloudflared.exe")
+    )
+    if (-not $cloudflaredExe) {
+        throw "No se encontro 'cloudflared'. Ejecuta primero .\scripts\01_instalar_nodo_gpu.ps1"
+    }
+} else {
+    if (-not $SshHost) {
+        throw "Falta -SshHost o GPU_SSH_HOST en .env para usar transporte 'ssh'."
+    }
+    $sshExe = Resolve-ToolExecutable -CommandName "ssh" -CandidatePaths @(
+        (Join-Path $env:WINDIR "System32\OpenSSH\ssh.exe")
+    )
+    if (-not $sshExe) {
+        throw "No se encontro 'ssh.exe' (OpenSSH Client de Windows)."
+    }
 }
 
 # 1. Verificar o iniciar Ollama en 127.0.0.1:11434
@@ -164,7 +192,145 @@ if ($nvidiaSmi) {
     & $nvidiaSmi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader
 }
 
-# 4. Iniciar tunel HTTPS hacia 127.0.0.1:11434
+function Register-PoolNode {
+    param([string]$TargetBaseUrl)
+
+    if (-not ($RegisterUrl -and $NodeToken -and ($NodeToken -ne "REEMPLAZAR_POR_TOKEN_OPERADOR"))) {
+        return $false
+    }
+
+    $regEndpoint = ("{0}/api/v1/internal/gpu-nodes/register" -f $RegisterUrl.TrimEnd("/"))
+    $regBody = @{
+        id       = $NodeId
+        label    = $NodeLabel
+        base_url = $TargetBaseUrl
+        model    = $Model
+        priority = $Priority
+    } | ConvertTo-Json -Depth 4
+    Write-Host ("Registrando nodo '{0}' en pool ExtractaIA ({1})..." -f $NodeId, $regEndpoint) -ForegroundColor Cyan
+    $regResp = Invoke-RestMethod -Uri $regEndpoint -Method Post -Headers @{ "X-Node-Token" = $NodeToken } -ContentType "application/json" -Body $regBody -TimeoutSec 12
+    if ($null -ne $regResp.node) {
+        Write-Host ("[OK] Nodo '{0}' registrado en el pool productivo (prioridad {1})." -f $NodeId, $Priority) -ForegroundColor Green
+        return $true
+    }
+    return $false
+}
+
+function Unregister-PoolNode {
+    if ($RegisterUrl -and $NodeToken -and ($NodeToken -ne "REEMPLAZAR_POR_TOKEN_OPERADOR")) {
+        try {
+            $delUrl = ("{0}/api/v1/internal/gpu-nodes/{1}" -f $RegisterUrl.TrimEnd("/"), $NodeId)
+            Invoke-RestMethod -Uri $delUrl -Method Delete -Headers @{ "X-Node-Token" = $NodeToken } -TimeoutSec 8 | Out-Null
+        } catch { }
+    }
+}
+
+function Stop-PreviousTunnelPid {
+    param([string]$PidFilePath)
+
+    if (Test-Path $PidFilePath) {
+        $oldPidText = (Get-Content $PidFilePath -ErrorAction SilentlyContinue | Out-String).Trim()
+        $oldPid = 0
+        if ([int]::TryParse($oldPidText, [ref]$oldPid)) {
+            $oldProc = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
+            if ($oldProc -and ($oldProc.ProcessName -in @("cloudflared", "ssh"))) {
+                Write-Host ("[WARN] Deteniendo tunel previo ({0} PID {1})..." -f $oldProc.ProcessName, $oldPid) -ForegroundColor Yellow
+                Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 1
+            }
+        }
+        Remove-Item -Path $PidFilePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# 4. Iniciar tunel seguro hacia 127.0.0.1:11434
+if ($Transport -eq "ssh") {
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    $runtimeDir = Join-Path $repoRoot ".runtime"
+    if (-not (Test-Path $runtimeDir)) {
+        New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+    }
+
+    $pidFile = Join-Path $runtimeDir "tunnel.pid"
+    $urlFile = Join-Path $runtimeDir "tunnel_url.txt"
+    $sshOutLog = Join-Path $runtimeDir "ssh_tunnel.out.log"
+    $sshErrLog = Join-Path $runtimeDir "ssh_tunnel.err.log"
+
+    Stop-PreviousTunnelPid -PidFilePath $pidFile
+    Remove-Item -Path $urlFile, $sshOutLog, $sshErrLog -Force -ErrorAction SilentlyContinue
+
+    $forwardSpec = ("127.0.0.1:{0}:127.0.0.1:11434" -f $SshRemotePort)
+    Write-Host ("`nIniciando tunel SSH inverso privado ({0} -> {1})..." -f $SshHost, $forwardSpec) -ForegroundColor Cyan
+    $proc = Start-Process -FilePath $sshExe `
+        -ArgumentList @("-N", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3", "-o", "ExitOnForwardFailure=yes", "-R", $forwardSpec, $SshHost) `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $sshOutLog `
+        -RedirectStandardError $sshErrLog `
+        -PassThru
+
+    $tunnelUrl = ("http://127.0.0.1:{0}" -f $SshRemotePort)
+    $sshVerified = $false
+    $lastSshError = ""
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        Start-Sleep -Seconds 1
+        if ($proc.HasExited) {
+            $errTail = if (Test-Path $sshErrLog) { (Get-Content -Path $sshErrLog -Tail 25 -ErrorAction SilentlyContinue) -join "`n" } else { "(sin salida en ssh_tunnel.err.log)" }
+            throw ("El tunel SSH termino inesperadamente (exit {0}):`n{1}" -f $proc.ExitCode, $errTail)
+        }
+        try {
+            $probeOut = & $sshExe -o BatchMode=yes $SshHost ("curl -fsS --max-time 5 http://127.0.0.1:{0}/api/tags" -f $SshRemotePort) 2>&1
+            if ($LASTEXITCODE -eq 0 -and ($probeOut -join " ") -match "models") {
+                $sshVerified = $true
+                break
+            }
+            $lastSshError = ($probeOut -join " ")
+        } catch {
+            $lastSshError = $_.Exception.Message
+        }
+    }
+
+    if (-not $sshVerified) {
+        if (-not $proc.HasExited) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        }
+        $errTail = if (Test-Path $sshErrLog) { (Get-Content -Path $sshErrLog -Tail 25 -ErrorAction SilentlyContinue) -join "`n" } else { "" }
+        throw ("No se pudo verificar el tunel SSH en {0}:{1}. Ultimo error: {2}`n{3}" -f $SshHost, $SshRemotePort, $lastSshError, $errTail)
+    }
+
+    Set-Content -Path $pidFile -Value ([string]$proc.Id) -Encoding ASCII -NoNewline
+    Set-Content -Path $urlFile -Value $tunnelUrl -Encoding ASCII -NoNewline
+
+    $poolRegistered = Register-PoolNode -TargetBaseUrl $tunnelUrl
+
+    Write-Host "`n=====================================================================" -ForegroundColor Green
+    Write-Host "STATUS=READY" -ForegroundColor Green
+    Write-Host "TRANSPORT=ssh" -ForegroundColor White
+    Write-Host ("TUNNEL_URL={0}" -f $tunnelUrl) -ForegroundColor White
+    Write-Host ("TUNNEL_PID={0}" -f $proc.Id) -ForegroundColor White
+    Write-Host ("PROFILE={0}" -f $Profile) -ForegroundColor White
+    Write-Host ("MODEL={0}" -f $Model) -ForegroundColor White
+    Write-Host ("NODE_ID={0}" -f $NodeId) -ForegroundColor White
+    Write-Host ("POOL_REGISTERED={0}" -f $poolRegistered) -ForegroundColor White
+    Write-Host "PORTAL_URL=https://extractaia.dburela.com" -ForegroundColor White
+    Write-Host "=====================================================================" -ForegroundColor Green
+
+    if ($KeepAlive -or (-not $Detached)) {
+        Write-Host "Modo KeepAlive SSH activo: manteniendo nodo GPU conectado al servidor Oracle. Presiona Ctrl+C para detener." -ForegroundColor Yellow
+        try {
+            while (-not $proc.HasExited) {
+                Start-Sleep -Seconds 5
+            }
+            Write-Host ("[WARN] El tunel SSH finalizo inesperadamente (codigo {0})." -f $proc.ExitCode) -ForegroundColor Yellow
+        } finally {
+            if ($poolRegistered) { Unregister-PoolNode }
+            if (-not $proc.HasExited) {
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    exit 0
+}
+
 if ($Detached) {
     $repoRoot = Split-Path -Parent $PSScriptRoot
     $runtimeDir = Join-Path $repoRoot ".runtime"
@@ -177,25 +343,12 @@ if ($Detached) {
     $outLog = Join-Path $runtimeDir "cloudflared.out.log"
     $errLog = Join-Path $runtimeDir "cloudflared.err.log"
 
-    if (Test-Path $pidFile) {
-        $oldPidText = (Get-Content $pidFile -ErrorAction SilentlyContinue | Out-String).Trim()
-        $oldPid = 0
-        if ([int]::TryParse($oldPidText, [ref]$oldPid)) {
-            $oldProc = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
-            if ($oldProc -and $oldProc.ProcessName -eq "cloudflared") {
-                Write-Host ("[WARN] Deteniendo tunel cloudflared previo (PID {0})..." -f $oldPid) -ForegroundColor Yellow
-                Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 1
-            }
-        }
-        Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue
-    }
-
+    Stop-PreviousTunnelPid -PidFilePath $pidFile
     Remove-Item -Path $urlFile, $outLog, $errLog -Force -ErrorAction SilentlyContinue
 
     Write-Host ("`nIniciando tunel Cloudflare desacoplado (protocol={0})..." -f $Protocol) -ForegroundColor Cyan
     $proc = Start-Process -FilePath $cloudflaredExe `
-        -ArgumentList @("tunnel", "--url", "http://127.0.0.1:11434", "--protocol", $Protocol, "--no-autoupdate") `
+        -ArgumentList @("tunnel", "--url", "http://127.0.0.1:11434", "--http-host-header", "127.0.0.1:11434", "--protocol", $Protocol, "--no-autoupdate") `
         -WindowStyle Hidden `
         -RedirectStandardOutput $outLog `
         -RedirectStandardError $errLog `
@@ -237,7 +390,7 @@ if ($Detached) {
     Write-Host ("Verificando conectividad externa en {0}..." -f $tunnelUrl) -ForegroundColor Cyan
     $remoteVerified = $false
     $lastRemoteError = ""
-    for ($attempt = 1; $attempt -le 8; $attempt++) {
+    for ($attempt = 1; $attempt -le 12; $attempt++) {
         try {
             $tagsResp = Invoke-RestMethod -Uri ("{0}/api/tags" -f $tunnelUrl) -Method Get -TimeoutSec 8
             $modelsResp = Invoke-RestMethod -Uri ("{0}/v1/models" -f $tunnelUrl) -Method Get -TimeoutSec 8
@@ -257,29 +410,14 @@ if ($Detached) {
         }
         Remove-Item -Path $pidFile, $urlFile -Force -ErrorAction SilentlyContinue
         $errTail = if (Test-Path $errLog) { (Get-Content -Path $errLog -Tail 30 -ErrorAction SilentlyContinue) -join "`n" } else { "" }
-        throw ("El tunel {0} no respondio HTTP 200 en /api/tags y /v1/models tras 8 reintentos. Ultimo error: {1}`n{2}" -f $tunnelUrl, $lastRemoteError, $errTail)
+        throw ("El tunel {0} no respondio HTTP 200 en /api/tags y /v1/models tras 12 reintentos. Ultimo error: {1}`n{2}" -f $tunnelUrl, $lastRemoteError, $errTail)
     }
 
-    $poolRegistered = $false
-    if ($RegisterUrl -and $NodeToken -and ($NodeToken -ne "REEMPLAZAR_POR_TOKEN_OPERADOR")) {
-        $regEndpoint = ("{0}/api/v1/internal/gpu-nodes/register" -f $RegisterUrl.TrimEnd("/"))
-        $regBody = @{
-            id       = $NodeId
-            label    = $NodeLabel
-            base_url = $tunnelUrl
-            model    = $Model
-            priority = $Priority
-        } | ConvertTo-Json -Depth 4
-        Write-Host ("Registrando nodo '{0}' en pool ExtractaIA ({1})..." -f $NodeId, $regEndpoint) -ForegroundColor Cyan
-        $regResp = Invoke-RestMethod -Uri $regEndpoint -Method Post -Headers @{ "X-Node-Token" = $NodeToken } -ContentType "application/json" -Body $regBody -TimeoutSec 12
-        if ($null -ne $regResp.node) {
-            $poolRegistered = $true
-            Write-Host ("[OK] Nodo '{0}' registrado en el pool productivo (prioridad {1})." -f $NodeId, $Priority) -ForegroundColor Green
-        }
-    }
+    $poolRegistered = Register-PoolNode -TargetBaseUrl $tunnelUrl
 
     Write-Host "`n=====================================================================" -ForegroundColor Green
     Write-Host "STATUS=READY" -ForegroundColor Green
+    Write-Host "TRANSPORT=cloudflare" -ForegroundColor White
     Write-Host ("TUNNEL_URL={0}" -f $tunnelUrl) -ForegroundColor White
     Write-Host ("TUNNEL_PID={0}" -f $proc.Id) -ForegroundColor White
     Write-Host ("PROFILE={0}" -f $Profile) -ForegroundColor White
@@ -298,12 +436,7 @@ if ($Detached) {
             }
             Write-Host ("[WARN] cloudflared finalizo inesperadamente (codigo {0})." -f $proc.ExitCode) -ForegroundColor Yellow
         } finally {
-            if ($poolRegistered -and $RegisterUrl -and $NodeToken -and ($NodeToken -ne "REEMPLAZAR_POR_TOKEN_OPERADOR")) {
-                try {
-                    $delUrl = ("{0}/api/v1/internal/gpu-nodes/{1}" -f $RegisterUrl.TrimEnd("/"), $NodeId)
-                    Invoke-RestMethod -Uri $delUrl -Method Delete -Headers @{ "X-Node-Token" = $NodeToken } -TimeoutSec 8 | Out-Null
-                } catch { }
-            }
+            if ($poolRegistered) { Unregister-PoolNode }
             if (-not $proc.HasExited) {
                 Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
             }
@@ -320,4 +453,4 @@ Write-Host " 3) Si configuraste .env local, inicia con -Detached para auto-regis
 Write-Host " 4) Presiona Ctrl+C al finalizar para cerrar el tunel al instante." -ForegroundColor White
 Write-Host "=====================================================================`n" -ForegroundColor Yellow
 
-& $cloudflaredExe tunnel --url http://127.0.0.1:11434 --protocol $Protocol --no-autoupdate
+& $cloudflaredExe tunnel --url http://127.0.0.1:11434 --http-host-header 127.0.0.1:11434 --protocol $Protocol --no-autoupdate

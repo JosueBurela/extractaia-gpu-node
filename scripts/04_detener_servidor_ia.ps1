@@ -47,9 +47,9 @@ if (Test-Path $pidFile) {
     $parsedPid = 0
     if ([int]::TryParse($pidText, [ref]$parsedPid)) {
         $proc = Get-Process -Id $parsedPid -ErrorAction SilentlyContinue
-        if ($proc -and $proc.ProcessName -eq "cloudflared") {
+        if ($proc -and ($proc.ProcessName -in @("cloudflared", "ssh"))) {
             Stop-Process -Id $parsedPid -Force -ErrorAction SilentlyContinue
-            Write-Host ("[OK] Tunel cloudflared detenido (PID {0})." -f $parsedPid) -ForegroundColor Green
+            Write-Host ("[OK] Tunel {0} detenido (PID {1})." -f $proc.ProcessName, $parsedPid) -ForegroundColor Green
             $stoppedCount++
         } else {
             Write-Host ("[OK] El PID {0} guardado en tunnel.pid ya no estaba activo." -f $parsedPid) -ForegroundColor Yellow
@@ -63,17 +63,18 @@ if (Test-Path $urlFile) {
 }
 
 $remainingCloudflared = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.Name -match "^cloudflared(\.exe)?$" -and $_.CommandLine -match "127\.0\.0\.1:11434"
+    ($_.Name -match "^cloudflared(\.exe)?$" -and $_.CommandLine -match "127\.0\.0\.1:11434") -or
+    ($_.Name -match "^ssh(\.exe)?$" -and $_.CommandLine -match "-R\s+127\.0\.0\.1:\d+:127\.0\.0\.1:11434")
 }
 
 foreach ($orphan in $remainingCloudflared) {
     Stop-Process -Id $orphan.ProcessId -Force -ErrorAction SilentlyContinue
-    Write-Host ("[OK] Tunel cloudflared residual detenido (PID {0})." -f $orphan.ProcessId) -ForegroundColor Green
+    Write-Host ("[OK] Tunel residual detenido ({0} PID {1})." -f $orphan.Name, $orphan.ProcessId) -ForegroundColor Green
     $stoppedCount++
 }
 
 if ($stoppedCount -eq 0) {
-    Write-Host "[OK] No habia procesos cloudflared activos apuntando a 127.0.0.1:11434." -ForegroundColor Green
+    Write-Host "[OK] No habia procesos de tunel activos apuntando a 127.0.0.1:11434." -ForegroundColor Green
 }
 
 if ($StopOllama) {
